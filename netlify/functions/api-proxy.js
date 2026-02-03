@@ -1,12 +1,10 @@
 const admin = require('firebase-admin');
-const fetch = require('node-fetch');
 
 // --- FIREBASE ADMIN INITIALIZATION ---
-// We check if the app is already initialized to prevent "App already exists" errors in hot-reload environments.
+// We check if the app is already initialized to prevent "App already exists" errors.
 if (admin.apps.length === 0) {
   try {
-    // OPTION 1: Using a Base64 encoded Service Account JSON (Recommended for Netlify)
-    // This prevents issues with newlines in private keys.
+    // This looks for the Base64 variable we asked you to set in Netlify
     if (process.env.FIREBASE_SERVICE_ACCOUNT_BASE64) {
       const serviceAccount = JSON.parse(
         Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_BASE64, 'base64').toString('utf8')
@@ -14,37 +12,29 @@ if (admin.apps.length === 0) {
       admin.initializeApp({
         credential: admin.credential.cert(serviceAccount)
       });
-    } 
-    // OPTION 2: Using individual variables (Common fallback)
-    else if (process.env.FIREBASE_PRIVATE_KEY && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PROJECT_ID) {
-      admin.initializeApp({
-        credential: admin.credential.cert({
-          projectId: process.env.FIREBASE_PROJECT_ID,
-          clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-          // Handle private key newlines correctly for Netlify
-          privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-        })
-      });
     } else {
-      console.error("❌ MISSING CREDENTIALS: FIREBASE_SERVICE_ACCOUNT_BASE64 or FIREBASE_PRIVATE_KEY env vars are not set.");
-      throw new Error("Missing Firebase Credentials");
+      console.error("❌ MISSING CREDENTIALS: FIREBASE_SERVICE_ACCOUNT_BASE64 env var is not set.");
+      // We don't throw here to allow the function to return a clean error message below
     }
   } catch (error) {
     console.error("❌ FIREBASE INIT ERROR:", error);
-    // We do not throw here to allow the function to return a 500 error properly instead of crashing the process
   }
 }
 
 const db = admin.firestore();
 
 // --- 5SIM API CONFIGURATION ---
-const FIVESIM_API_TOKEN = process.env.FIVESIM_API_TOKEN; // Add this to Netlify Env Vars
+const FIVESIM_API_TOKEN = process.env.FIVESIM_API_TOKEN; 
 const BASE_URL = 'https://5sim.net/v1';
 
 exports.handler = async (event, context) => {
+  // --- FIX: Dynamic Import for node-fetch ---
+  // This fixes the ERR_REQUIRE_ESM error by importing fetch only when the function runs.
+  const fetch = (await import('node-fetch')).default;
+
   // 1. Handle CORS (Allow requests from your frontend)
   const headers = {
-    'Access-Control-Allow-Origin': '*', // Change '*' to your domain in production for security
+    'Access-Control-Allow-Origin': '*', 
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     'Access-Control-Allow-Methods': 'POST, OPTIONS'
   };
@@ -58,52 +48,45 @@ exports.handler = async (event, context) => {
     return {
       statusCode: 500,
       headers,
-      body: JSON.stringify({ error: 'Server misconfiguration: Firebase Admin not initialized.' })
+      body: JSON.stringify({ error: 'Server misconfiguration: Firebase Admin not initialized. Check server logs.' })
     };
   }
 
   try {
-    // 3. Authenticate User (Verify the ID Token sent from Frontend)
-    // We expect the Authorization header: "Bearer <token>"
-    const authHeader = event.headers.authorization || event.headers.Authorization;
-    
-    // NOTE: For 'getOperatorsAndPrices', we might allow public access (no token).
-    // If you want strict auth for everything, uncomment the check below.
-    
-    /* if (!authHeader || !authHeader.startsWith('Bearer ')) {
-       return { statusCode: 401, headers, body: JSON.stringify({ error: 'Unauthorized: Missing token' }) };
-    }
-    const idToken = authHeader.split('Bearer ')[1];
-    const decodedToken = await admin.auth().verifyIdToken(idToken);
-    const userId = decodedToken.uid;
-    */
-
-    // 4. Parse Request
+    // 3. Parse Request
     const { action, payload } = JSON.parse(event.body);
 
-    // 5. Route Actions
+    // 4. Route Actions
     let result;
 
     if (action === 'getOperatorsAndPrices') {
       const { country, product } = payload;
-      // Fetch from 5SIM Guest API (No token needed for guest endpoints usually, but good to proxy)
+      // Fetch from 5SIM Guest API
       const response = await fetch(`${BASE_URL}/guest/prices?country=${country}&product=${product}`, {
         headers: { 'Accept': 'application/json' }
       });
       result = await response.json();
     
     } else if (action === 'buyNumber') {
-      // REQUIRE AUTH for buying
+      // User must be logged in to buy
       const authHeader = event.headers.authorization || event.headers.Authorization;
       if (!authHeader) throw new Error("Unauthorized");
+      
       const idToken = authHeader.split('Bearer ')[1];
-      const user = await admin.auth().verifyIdToken(idToken); // Verify user
+      await admin.auth().verifyIdToken(idToken); // Verify the user's token
 
       const { service, server, operator } = payload;
       
-      // Call 5SIM User Buy API
-      // Note: We use the server-side FIVESIM_API_TOKEN here
-      const fetchUrl = `${BASE_URL}/user/buy/activation/${server.name}/${operator.name}/${service.name.toLowerCase()}`;
+      // Determine request URL based on whether operator is "any" or specific
+      let fetchUrl;
+      // Safety check: ensure operator object exists
+      const opName = operator && operator.name ? operator.name : 'any';
+      
+      if (opName === 'any') {
+          fetchUrl = `${BASE_URL}/user/buy/activation/${server.name}/any/${service.name.toLowerCase()}`;
+      } else {
+          fetchUrl = `${BASE_URL}/user/buy/activation/${server.name}/${opName}/${service.name.toLowerCase()}`;
+      }
       
       const response = await fetch(fetchUrl, {
         headers: { 
@@ -112,11 +95,6 @@ exports.handler = async (event, context) => {
         }
       });
       result = await response.json();
-
-      // If successful, you might want to log this to Firestore here as a backup
-      if (result.id) {
-         // Log purchase logic here if needed
-      }
 
     } else if (action === 'checkOrder') {
         const { orderId } = payload;
