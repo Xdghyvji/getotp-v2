@@ -1,20 +1,20 @@
-const admin = require('firebase-admin');
+import admin from 'firebase-admin';
+import fetch from 'node-fetch';
 
 // --- FIREBASE ADMIN INITIALIZATION ---
-// We check if the app is already initialized to prevent "App already exists" errors.
+// Check if the app is already initialized
 if (admin.apps.length === 0) {
   try {
-    // This looks for the Base64 variable we asked you to set in Netlify
+    // Looks for the Base64 variable in Netlify
     if (process.env.FIREBASE_SERVICE_ACCOUNT_BASE64) {
-      const serviceAccount = JSON.parse(
-        Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_BASE64, 'base64').toString('utf8')
-      );
+      const buffer = Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_BASE64, 'base64');
+      const serviceAccount = JSON.parse(buffer.toString('utf8'));
+      
       admin.initializeApp({
         credential: admin.credential.cert(serviceAccount)
       });
     } else {
       console.error("❌ MISSING CREDENTIALS: FIREBASE_SERVICE_ACCOUNT_BASE64 env var is not set.");
-      // We don't throw here to allow the function to return a clean error message below
     }
   } catch (error) {
     console.error("❌ FIREBASE INIT ERROR:", error);
@@ -27,12 +27,8 @@ const db = admin.firestore();
 const FIVESIM_API_TOKEN = process.env.FIVESIM_API_TOKEN; 
 const BASE_URL = 'https://5sim.net/v1';
 
-exports.handler = async (event, context) => {
-  // --- FIX: Dynamic Import for node-fetch ---
-  // This fixes the ERR_REQUIRE_ESM error by importing fetch only when the function runs.
-  const fetch = (await import('node-fetch')).default;
-
-  // 1. Handle CORS (Allow requests from your frontend)
+export const handler = async (event, context) => {
+  // 1. Handle CORS
   const headers = {
     'Access-Control-Allow-Origin': '*', 
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
@@ -48,7 +44,7 @@ exports.handler = async (event, context) => {
     return {
       statusCode: 500,
       headers,
-      body: JSON.stringify({ error: 'Server misconfiguration: Firebase Admin not initialized. Check server logs.' })
+      body: JSON.stringify({ error: 'Server misconfiguration: Firebase Admin not initialized. Check logs.' })
     };
   }
 
@@ -61,7 +57,6 @@ exports.handler = async (event, context) => {
 
     if (action === 'getOperatorsAndPrices') {
       const { country, product } = payload;
-      // Fetch from 5SIM Guest API
       const response = await fetch(`${BASE_URL}/guest/prices?country=${country}&product=${product}`, {
         headers: { 'Accept': 'application/json' }
       });
@@ -73,13 +68,12 @@ exports.handler = async (event, context) => {
       if (!authHeader) throw new Error("Unauthorized");
       
       const idToken = authHeader.split('Bearer ')[1];
-      await admin.auth().verifyIdToken(idToken); // Verify the user's token
+      await admin.auth().verifyIdToken(idToken); 
 
       const { service, server, operator } = payload;
       
       // Determine request URL based on whether operator is "any" or specific
       let fetchUrl;
-      // Safety check: ensure operator object exists
       const opName = operator && operator.name ? operator.name : 'any';
       
       if (opName === 'any') {
