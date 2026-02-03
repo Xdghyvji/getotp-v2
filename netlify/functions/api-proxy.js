@@ -1,11 +1,9 @@
 import admin from 'firebase-admin';
-import fetch from 'node-fetch';
+import axios from 'axios';
 
 // --- FIREBASE ADMIN INITIALIZATION ---
-// Check if the app is already initialized
 if (admin.apps.length === 0) {
   try {
-    // Looks for the Base64 variable in Netlify
     if (process.env.FIREBASE_SERVICE_ACCOUNT_BASE64) {
       const buffer = Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_BASE64, 'base64');
       const serviceAccount = JSON.parse(buffer.toString('utf8'));
@@ -20,8 +18,6 @@ if (admin.apps.length === 0) {
     console.error("❌ FIREBASE INIT ERROR:", error);
   }
 }
-
-const db = admin.firestore();
 
 // --- 5SIM API CONFIGURATION ---
 const FIVESIM_API_TOKEN = process.env.FIVESIM_API_TOKEN; 
@@ -57,13 +53,15 @@ export const handler = async (event, context) => {
 
     if (action === 'getOperatorsAndPrices') {
       const { country, product } = payload;
-      const response = await fetch(`${BASE_URL}/guest/prices?country=${country}&product=${product}`, {
+      // Axios automatically parses JSON responses
+      const response = await axios.get(`${BASE_URL}/guest/prices`, {
+        params: { country, product },
         headers: { 'Accept': 'application/json' }
       });
-      result = await response.json();
+      result = response.data;
     
     } else if (action === 'buyNumber') {
-      // User must be logged in to buy
+      // Auth Check
       const authHeader = event.headers.authorization || event.headers.Authorization;
       if (!authHeader) throw new Error("Unauthorized");
       
@@ -72,9 +70,9 @@ export const handler = async (event, context) => {
 
       const { service, server, operator } = payload;
       
-      // Determine request URL based on whether operator is "any" or specific
+      // Determine request URL
+      let opName = operator && operator.name ? operator.name : 'any';
       let fetchUrl;
-      const opName = operator && operator.name ? operator.name : 'any';
       
       if (opName === 'any') {
           fetchUrl = `${BASE_URL}/user/buy/activation/${server.name}/any/${service.name.toLowerCase()}`;
@@ -82,43 +80,43 @@ export const handler = async (event, context) => {
           fetchUrl = `${BASE_URL}/user/buy/activation/${server.name}/${opName}/${service.name.toLowerCase()}`;
       }
       
-      const response = await fetch(fetchUrl, {
+      const response = await axios.get(fetchUrl, {
         headers: { 
           'Authorization': `Bearer ${FIVESIM_API_TOKEN}`,
           'Accept': 'application/json'
         }
       });
-      result = await response.json();
+      result = response.data;
 
     } else if (action === 'checkOrder') {
         const { orderId } = payload;
-        const response = await fetch(`${BASE_URL}/user/check/${orderId}`, {
+        const response = await axios.get(`${BASE_URL}/user/check/${orderId}`, {
             headers: { 
               'Authorization': `Bearer ${FIVESIM_API_TOKEN}`,
               'Accept': 'application/json'
             }
         });
-        result = await response.json();
+        result = response.data;
     
     } else if (action === 'finishOrder') {
         const { orderId } = payload;
-        const response = await fetch(`${BASE_URL}/user/finish/${orderId}`, {
+        const response = await axios.get(`${BASE_URL}/user/finish/${orderId}`, {
             headers: { 
               'Authorization': `Bearer ${FIVESIM_API_TOKEN}`,
               'Accept': 'application/json'
             }
         });
-        result = await response.json();
+        result = response.data;
 
     } else if (action === 'cancelOrder') {
         const { orderId } = payload;
-        const response = await fetch(`${BASE_URL}/user/cancel/${orderId}`, {
+        const response = await axios.get(`${BASE_URL}/user/cancel/${orderId}`, {
             headers: { 
               'Authorization': `Bearer ${FIVESIM_API_TOKEN}`,
               'Accept': 'application/json'
             }
         });
-        result = await response.json();
+        result = response.data;
     } else {
         throw new Error(`Unknown action: ${action}`);
     }
@@ -130,11 +128,17 @@ export const handler = async (event, context) => {
     };
 
   } catch (error) {
-    console.error("API Proxy Error:", error);
+    console.error("API Proxy Error:", error.message);
+    
+    // Handle Axios errors specifically to give better feedback
+    const errorMessage = error.response && error.response.data 
+        ? JSON.stringify(error.response.data) 
+        : error.message || 'Internal Server Error';
+
     return {
-      statusCode: 500,
+      statusCode: error.response ? error.response.status : 500,
       headers,
-      body: JSON.stringify({ error: error.message || 'Internal Server Error' })
+      body: JSON.stringify({ error: errorMessage })
     };
   }
 };
