@@ -2,9 +2,6 @@ import React, { useState, useEffect, useRef, createContext, useContext } from 'r
 // --- ADMIN PANEL IMPORT ---
 import AdminPanelApp from './modules/admin/adminpanel';
 
-// --- TAILWIND CSS SCRIPT ---
-// <script src="https://cdn.tailwindcss.com"></script>
-
 // --- FIREBASE IMPORTS ---
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import { 
@@ -282,7 +279,7 @@ const Footer = ({ setPage }) => (
     </footer>
 );
 
-// --- UPDATED API Call Helper ---
+// --- API Call Helper ---
 const apiCall = async (action, payload) => {
     try {
         const idToken = auth.currentUser ? await auth.currentUser.getIdToken() : null;
@@ -834,146 +831,239 @@ const ContentPage = ({ title }) => (
     </div>
 );
 
+// --- UPDATED ACTIVE ORDER COMPONENT (With Timer, Polling, Ban) ---
 const ActiveOrder = ({ user, orderData, onUpdateStatus, showToast }) => {
     const [order, setOrder] = useState(orderData);
-    const [timeLeft, setTimeLeft] = useState(1);
+    const [timeLeft, setTimeLeft] = useState(0);
+    const [isPolling, setIsPolling] = useState(true);
     const [copied, setCopied] = useState(false);
     const pollingRef = useRef(null);
 
-    // Main effect for countdown and polling
+    // 1. Initialize & Countdown Logic
     useEffect(() => {
-        // Set initial state from passed prop
-        setOrder(orderData);
-
-        // Calculate initial time left
-        const expiryTime = orderData.expires?.toDate ? orderData.expires.toDate().getTime() : new Date(orderData.expires).getTime();
-        const now = Date.now();
-        const initialTimeLeft = Math.round((expiryTime - now) / 1000);
-        setTimeLeft(initialTimeLeft > 0 ? initialTimeLeft : 0);
-
-        // Countdown timer
-        const countdownTimer = setInterval(() => {
-            setTimeLeft(prev => (prev > 0 ? prev - 1 : 0));
-        }, 1000);
-
-        // Polling for SMS
-        const startPolling = () => {
-            pollingRef.current = setInterval(async () => {
-                try {
-                    const updatedOrder = await apiCall("checkOrder", { orderId: orderData.id });
-                    
-                    if (updatedOrder.sms && updatedOrder.sms.length > 0) {
-                        // SMS found, update Firestore and stop polling
-                        const orderRef = doc(db, "users", user.uid, "orders", orderData.id);
-                        await updateDoc(orderRef, { 
-                            sms: updatedOrder.sms,
-                            status: 'RECEIVED' 
-                        });
-                        showToast("SMS Received!", "success");
-                        clearInterval(pollingRef.current);
-                    }
-                } catch (error) {
-                    console.error("Polling error:", error);
-                }
-            }, 10000); // Poll every 10 seconds
+        // Calculate time remaining based on the API's 'expires' timestamp
+        const updateTimer = () => {
+            if (!order.expires) return;
+            // Handle Firestore timestamp or ISO string
+            const expiryDate = order.expires.toDate ? order.expires.toDate() : new Date(order.expires);
+            const now = new Date();
+            const diff = Math.floor((expiryDate - now) / 1000);
+            setTimeLeft(diff > 0 ? diff : 0);
         };
 
-        if (orderData.status === 'PENDING') {
-            startPolling();
+        updateTimer();
+        const timerInterval = setInterval(updateTimer, 1000);
+
+        return () => clearInterval(timerInterval);
+    }, [order.expires]);
+
+    // 2. Polling Logic (Check for SMS)
+    useEffect(() => {
+        if (!isPolling || ['FINISHED', 'CANCELED', 'TIMEOUT', 'BANNED'].includes(order.status)) {
+            return;
         }
 
-        return () => {
-            clearInterval(countdownTimer);
-            if (pollingRef.current) {
-                clearInterval(pollingRef.current);
+        const pollOrder = async () => {
+            try {
+                const updatedData = await apiCall("checkOrder", { orderId: order.id });
+                
+                // If we have new data, update local state
+                if (updatedData) {
+                    setOrder(prev => ({ ...prev, ...updatedData }));
+
+                    // If SMS received, update Firestore
+                    if (updatedData.sms && updatedData.sms.length > 0) {
+                        const orderRef = doc(db, "users", user.uid, "orders", order.id);
+                        await updateDoc(orderRef, { 
+                            sms: updatedData.sms,
+                            status: 'RECEIVED'
+                        });
+                        if (order.status !== 'RECEIVED') {
+                            showToast("New SMS Received!", "success");
+                        }
+                    }
+
+                    // Stop polling if status is final
+                    if (['FINISHED', 'CANCELED', 'TIMEOUT', 'BANNED'].includes(updatedData.status)) {
+                        setIsPolling(false);
+                        onUpdateStatus(order.id, updatedData.status);
+                    }
+                }
+            } catch (error) {
+                console.error("Polling error:", error);
             }
         };
-    }, [orderData, user.uid, showToast]);
 
-    // Effect to update local state when Firestore data changes
-    useEffect(() => {
-        setOrder(orderData);
-    }, [orderData]);
+        pollingRef.current = setInterval(pollOrder, 5000); // Poll every 5s
+        return () => clearInterval(pollingRef.current);
+    }, [isPolling, order.id, order.status, user.uid, onUpdateStatus, showToast]);
 
 
-    // Effect for automatic cancellation when timer runs out
-    useEffect(() => {
-        if (timeLeft <= 0 && order.status === 'PENDING') {
-            onUpdateStatus(order.id, 'EXPIRED');
+    // 3. Actions
+    const handleCopy = () => {
+        navigator.clipboard.writeText(order.phone);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+        showToast("Number copied to clipboard", "info");
+    };
+
+    const handleAction = async (actionType) => {
+        try {
+            await apiCall(actionType, { orderId: order.id });
+            const newStatus = actionType === 'cancelOrder' ? 'CANCELED' : actionType === 'banOrder' ? 'BANNED' : 'FINISHED';
+            
+            // Update UI immediately
+            setOrder(prev => ({ ...prev, status: newStatus }));
+            setIsPolling(false);
+            
+            // Update Firestore
+            const orderRef = doc(db, "users", user.uid, "orders", order.id);
+            await updateDoc(orderRef, { status: newStatus });
+            
+            onUpdateStatus(order.id, newStatus);
+            showToast(`Order ${newStatus.toLowerCase()}`, "success");
+        } catch (error) {
+            showToast(`Action failed: ${error.message}`, 'error');
         }
-    }, [timeLeft, order, onUpdateStatus]);
+    };
 
-
+    // Helper: Format Seconds to MM:SS
     const formatTime = (seconds) => {
-        if (seconds <= 0) return "00:00";
-        const minutes = Math.floor(seconds / 60);
-        const secs = seconds % 60;
-        return `${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-    };
-    
-    const handleCopy = (text) => {
-        const textArea = document.createElement("textarea");
-        textArea.value = text;
-        document.body.appendChild(textArea);
-        textArea.select();
-        try {
-            document.execCommand('copy');
-            setCopied(true);
-            setTimeout(() => setCopied(false), 2000);
-        } catch (err) {
-            console.error('Failed to copy text: ', err);
-        }
-        document.body.removeChild(textArea);
+        const m = Math.floor(seconds / 60).toString().padStart(2, '0');
+        const s = (seconds % 60).toString().padStart(2, '0');
+        return `${m}:${s}`;
     };
 
-    const handleCancel = async () => {
-        try {
-            await apiCall("cancelOrder", { orderId: order.id });
-            onUpdateStatus(order.id, 'CANCELED');
-        } catch (error) {
-            showToast(`Error: ${error.message}`, 'error');
-        }
-    };
-
-    const handleFinish = async () => {
-        try {
-            await apiCall("finishOrder", { orderId: order.id });
-            onUpdateStatus(order.id, 'FINISHED');
-        } catch (error) {
-            showToast(`Error: ${error.message}`, 'error');
+    // Helper: Status Badge Color
+    const getStatusColor = (status) => {
+        switch (status) {
+            case 'RECEIVED': return 'bg-green-100 text-green-800 border-green-200';
+            case 'PENDING': return 'bg-yellow-100 text-yellow-800 border-yellow-200';
+            case 'CANCELED': return 'bg-red-100 text-red-800 border-red-200';
+            case 'BANNED': return 'bg-gray-100 text-gray-800 border-gray-200';
+            default: return 'bg-blue-100 text-blue-800 border-blue-200';
         }
     };
 
     return (
         <main className="w-full md:w-2/3 lg:w-3/4">
-            <Card className="p-6 animate-fade-in">
-                <h1 className="text-2xl font-bold text-gray-800 dark:text-gray-100 mb-4">Active Order</h1>
-                <div className="space-y-4 text-gray-800 dark:text-gray-200">
-                    <p><strong>Service:</strong> {order.product}</p>
-                    <div className="flex items-center space-x-2">
-                        <strong>Phone Number:</strong> 
-                        <span className="font-mono bg-gray-200 dark:bg-gray-700 p-2 rounded">{order.phone}</span>
-                        <button onClick={() => handleCopy(order.phone)} className="p-2 rounded-md hover:bg-gray-200 dark:hover:bg-gray-600">
-                            {copied ? <CheckIcon /> : <ClipboardIcon />}
-                        </button>
-                    </div>
-                    <p><strong>Status:</strong> <span className={`font-bold ${order.sms ? 'text-green-500' : 'text-yellow-500'}`}>{order.status}</span></p>
-                    <div className="text-center my-4 p-4 bg-gray-100 dark:bg-gray-700 rounded-lg">
-                        <p className="text-lg">Time Remaining</p>
-                        <p className={`text-4xl font-bold ${timeLeft < 60 ? 'text-red-500' : 'text-blue-600'}`}>{formatTime(timeLeft)}</p>
-                    </div>
-                    <div>
-                        <h3 className="font-bold mb-2">Received SMS:</h3>
-                        <div className="bg-gray-100 dark:bg-gray-700 p-4 rounded-md min-h-[100px] flex items-center justify-center font-mono text-lg tracking-widest">
-                            {order.sms && order.sms.length > 0 ? order.sms[0].text : <Spinner />}
+            <div className="space-y-6">
+                
+                {/* Header Card */}
+                <Card className="p-6 border-l-4 border-blue-500">
+                    <div className="flex justify-between items-start">
+                        <div>
+                            <h1 className="text-2xl font-bold text-gray-800 dark:text-gray-100 flex items-center">
+                                {order.product} <span className="ml-3 text-sm font-normal text-gray-500">#{order.id}</span>
+                            </h1>
+                            <p className="text-gray-500 dark:text-gray-400 mt-1">
+                                Operator: <span className="font-semibold capitalize">{order.operator}</span> | Server: <span className="font-semibold capitalize">{order.server || order.country}</span>
+                            </p>
+                        </div>
+                        <div className={`px-4 py-1 rounded-full border text-sm font-bold ${getStatusColor(order.status)}`}>
+                            {order.status}
                         </div>
                     </div>
+                </Card>
+
+                {/* Main Info Grid */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    
+                    {/* Phone Number & Timer */}
+                    <Card className="p-6 flex flex-col justify-center items-center text-center space-y-6">
+                        <div>
+                            <p className="text-sm text-gray-500 mb-2 uppercase tracking-wide font-semibold">Virtual Number</p>
+                            <div className="flex items-center justify-center space-x-3 bg-gray-100 dark:bg-gray-700 px-6 py-3 rounded-xl">
+                                <span className="text-3xl font-mono font-bold text-gray-800 dark:text-white tracking-wider">
+                                    {order.phone}
+                                </span>
+                                <button onClick={handleCopy} className="text-gray-500 hover:text-blue-600 transition-colors" title="Copy Number">
+                                    {copied ? <CheckIcon /> : <ClipboardIcon />}
+                                </button>
+                            </div>
+                        </div>
+
+                        <div className="w-full border-t border-gray-200 dark:border-gray-600"></div>
+
+                        <div>
+                            <p className="text-sm text-gray-500 mb-1 uppercase tracking-wide font-semibold">Time Remaining</p>
+                            <div className={`text-5xl font-bold tabular-nums ${timeLeft < 60 ? 'text-red-500 animate-pulse' : 'text-blue-600'}`}>
+                                {formatTime(timeLeft)}
+                            </div>
+                            <p className="text-xs text-gray-400 mt-2">Order expires automatically</p>
+                        </div>
+                    </Card>
+
+                    {/* SMS Inbox */}
+                    <Card className="p-6 flex flex-col h-full min-h-[300px]">
+                        <h3 className="text-lg font-bold text-gray-800 dark:text-gray-200 mb-4 flex items-center">
+                            <span className="mr-2">📩</span> SMS Inbox
+                        </h3>
+                        
+                        <div className="flex-grow bg-gray-50 dark:bg-gray-900/50 rounded-lg p-4 overflow-y-auto space-y-3 custom-scrollbar">
+                            {order.sms && order.sms.length > 0 ? (
+                                order.sms.map((msg, idx) => (
+                                    <div key={idx} className="bg-white dark:bg-gray-800 p-4 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 animate-fade-in">
+                                        <div className="flex justify-between items-center mb-2">
+                                            <span className="text-xs font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded uppercase">{msg.sender}</span>
+                                            <span className="text-xs text-gray-400">{msg.date ? new Date(msg.date).toLocaleTimeString() : 'Just now'}</span>
+                                        </div>
+                                        <p className="text-gray-800 dark:text-gray-200 font-mono text-sm leading-relaxed">
+                                            {msg.text}
+                                        </p>
+                                        {msg.code && (
+                                            <div className="mt-3 flex items-center">
+                                                <span className="text-xs text-gray-500 mr-2">Code:</span>
+                                                <code className="bg-gray-100 dark:bg-gray-900 px-2 py-1 rounded text-lg font-bold tracking-widest select-all cursor-pointer hover:bg-yellow-100 transition-colors">
+                                                    {msg.code}
+                                                </code>
+                                            </div>
+                                        )}
+                                    </div>
+                                ))
+                            ) : (
+                                <div className="h-full flex flex-col items-center justify-center text-gray-400 space-y-3">
+                                    {order.status === 'PENDING' ? (
+                                        <>
+                                            <Spinner /> 
+                                            <p className="animate-pulse">Waiting for SMS...</p>
+                                            <p className="text-xs text-center max-w-xs">Use the number above in the service. The code will appear here instantly.</p>
+                                        </>
+                                    ) : (
+                                        <p>No messages received.</p>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                    </Card>
                 </div>
-                <div className="mt-6 flex justify-end space-x-4">
-                     <Button variant="secondary" onClick={handleCancel}>Cancel Order</Button>
-                     <Button onClick={handleFinish}>Mark as Finished</Button>
-                </div>
-            </Card>
+
+                {/* Action Buttons */}
+                <Card className="p-4 flex flex-wrap justify-between items-center gap-4 bg-gray-50 dark:bg-gray-800/50">
+                    <div className="text-sm text-gray-500">
+                        <p><strong>Note:</strong> Cancel or Ban if no code arrives within 2 mins.</p>
+                    </div>
+                    <div className="flex space-x-3">
+                        {/* Only show Cancel/Ban if order is active and no SMS yet */}
+                        {order.status === 'PENDING' && (!order.sms || order.sms.length === 0) && (
+                            <>
+                                <Button variant="secondary" onClick={() => handleAction('banOrder')} className="hover:bg-red-100 hover:text-red-700">
+                                    🚫 Ban / Invalid
+                                </Button>
+                                <Button variant="secondary" onClick={() => handleAction('cancelOrder')}>
+                                    ❌ Cancel Order
+                                </Button>
+                            </>
+                        )}
+                        
+                        {/* Show Finish if we have SMS or user wants to close manually */}
+                        <Button onClick={() => handleAction('finishOrder')} className="bg-green-600 hover:bg-green-700">
+                            ✅ Finish Order
+                        </Button>
+                    </div>
+                </Card>
+
+            </div>
         </main>
     );
 };

@@ -53,7 +53,6 @@ export const handler = async (event, context) => {
 
     if (action === 'getOperatorsAndPrices') {
       const { country, product } = payload;
-      // Axios automatically parses JSON responses
       const response = await axios.get(`${BASE_URL}/guest/prices`, {
         params: { country, product },
         headers: { 'Accept': 'application/json' }
@@ -117,6 +116,17 @@ export const handler = async (event, context) => {
             }
         });
         result = response.data;
+
+    } else if (action === 'banOrder') {
+        const { orderId } = payload;
+        const response = await axios.get(`${BASE_URL}/user/ban/${orderId}`, {
+            headers: { 
+              'Authorization': `Bearer ${FIVESIM_API_TOKEN}`,
+              'Accept': 'application/json'
+            }
+        });
+        result = response.data;
+
     } else {
         throw new Error(`Unknown action: ${action}`);
     }
@@ -130,7 +140,6 @@ export const handler = async (event, context) => {
   } catch (error) {
     console.error("API Proxy Error:", error.message);
     
-    // Handle Axios errors specifically to give better feedback
     const errorMessage = error.response && error.response.data 
         ? JSON.stringify(error.response.data) 
         : error.message || 'Internal Server Error';
